@@ -84,6 +84,11 @@ impl OutputPolicy {
             path: target.to_path_buf(),
             roots: self.allowed_roots.clone(),
         };
+        // `..` resolves lexically on Windows but not on Unix (and can step around symlinks), so
+        // reject it outright for identical, safe behaviour everywhere.
+        if target.components().any(|c| c == Component::ParentDir) {
+            return Err(not_allowed());
+        }
         let inside = within_roots(target, &self.allowed_roots);
         if inside { Ok(()) } else { Err(not_allowed()) }
     }
@@ -263,7 +268,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let foreign = outside.path().join("x.png");
         let foreign = foreign.to_str().unwrap();
-        for bad in [foreign, "../../x.png", "../escape/x.png"] {
+        for bad in [foreign, "../../x.png", "../escape/x.png", "sub/../../x.png"] {
             let err = p.plan(Some(bad), None, "x", 1).unwrap_err();
             assert_eq!(err.code(), "output_path_not_allowed", "{bad}: {err}");
         }
