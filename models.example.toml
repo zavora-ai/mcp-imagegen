@@ -1,0 +1,84 @@
+# mcp-imagegen model registry.
+# Location: next to config.toml. Adding a model on an existing backend is config only.
+#
+# Each file is either an explicit `path = "..."` or `hf_repo` + `hf_file`, looked up in the
+# Hugging Face cache (newest snapshot wins). Missing files are reported by list_models with
+# the `hf download` command; the server never downloads anything itself.
+
+[[models]]
+id = "qwen-image-2.1-turbo"
+backend = "sdcpp"
+capabilities = ["txt2img", "edit"]
+max_ref_images = 3
+# Weights: research / non-commercial. Qwen team statement (2026-09): outputs are not part of the
+# licensed Materials and users retain rights to generated images. Re-check the model card before shipping.
+license = "Qwen Research License"
+commercial_weights = false
+est_memory_mb = 14800          # measured peak RSS 14.53 GB (1024² edit, vision weights + turbo LoRA)
+max_pixels = 4_194_304          # 2048x2048
+size_multiple = 32
+extra_args = ["--fa"]           # needs stable-diffusion.cpp >= 2f88688 (2026-09-26)
+# Default. Viggle's DMD turbo LoRA: 6 steps on fixed sigma nodes, cfg 1 (sd.cpp applies the LoRA at runtime).
+# 1024x1024 on an M4: 232 s sampling / 298 s wall vs 312 / 379 s for qwen-image-2.1, and sharper (docs/benchmarks.md).
+defaults = { width = 1024, height = 1024, steps = 6, cfg_scale = 1.0, sampler = "euler" }
+sigma_schedule = { raw = [1.0, 0.9375, 0.875, 0.75, 0.5, 0.25], shift = { kind = "flux_dynamic", base_seq = 256, max_seq = 8192, base_shift = 0.5, max_shift = 0.9, patch = 16 } }
+
+[[models.loras]]
+file = { hf_repo = "Viggle/Qwen-Image-2.1-viggle-turbo", hf_file = "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r128.safetensors", size_mb = 680 }
+multiplier = 1.0
+
+[models.files]
+diffusion_model = { hf_repo = "leejet/Qwen-Image-2.1-GGUF", hf_file = "qwen_image_2.1-Q8_0.gguf", size_mb = 7690 }
+llm = { hf_repo = "Qwen/Qwen3-VL-8B-Instruct-GGUF", hf_file = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", size_mb = 5030 }
+vae = { hf_repo = "Comfy-Org/Qwen-Image-2.1", hf_file = "vae/qwen_image_2.1_vae_bf16.safetensors", size_mb = 680 }
+
+[models.edit_files]
+llm_vision = { hf_repo = "Qwen/Qwen3-VL-8B-Instruct-GGUF", hf_file = "mmproj-Qwen3VL-8B-Instruct-F16.gguf", size_mb = 1160 }
+
+[[models]]
+id = "qwen-image-2.1"
+backend = "sdcpp"
+capabilities = ["txt2img", "edit"]
+max_ref_images = 3
+# Weights: research / non-commercial. Qwen team statement (2026-09): outputs are not part of the
+# licensed Materials and users retain rights to generated images. Re-check the model card before shipping.
+license = "Qwen Research License"
+commercial_weights = false
+est_memory_mb = 13500          # measured peak RSS: 12.1 GB generating, 13.3 GB with vision weights loaded (editing)
+max_pixels = 4_194_304          # 2048x2048
+size_multiple = 32
+extra_args = ["--fa"]           # needs stable-diffusion.cpp >= 2f88688 (2026-09-26)
+# Fast default. Qwen-Image-2.1 is effectively guidance-free: cfg 1.0 halves the passes with no visible loss,
+# and EasyCache skips ~half the steps. 512x512 on an M4: 82 s sampling vs 322 s at cfg 6 (docs/benchmarks.md).
+defaults = { width = 1024, height = 1024, steps = 20, cfg_scale = 1.0, sampler = "euler" }
+backend_options = { cache_mode = "easycache" }
+
+[models.files]
+diffusion_model = { hf_repo = "leejet/Qwen-Image-2.1-GGUF", hf_file = "qwen_image_2.1-Q8_0.gguf", size_mb = 7690 }
+llm = { hf_repo = "Qwen/Qwen3-VL-8B-Instruct-GGUF", hf_file = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", size_mb = 5030 }
+vae = { hf_repo = "Comfy-Org/Qwen-Image-2.1", hf_file = "vae/qwen_image_2.1_vae_bf16.safetensors", size_mb = 680 }
+
+[models.edit_files]
+llm_vision = { hf_repo = "Qwen/Qwen3-VL-8B-Instruct-GGUF", hf_file = "mmproj-Qwen3VL-8B-Instruct-F16.gguf", size_mb = 1160 }
+
+[[models]]
+id = "qwen-image-2.1-hq"
+backend = "sdcpp"
+capabilities = ["txt2img", "edit"]
+max_ref_images = 3
+license = "Qwen Research License"
+commercial_weights = false
+est_memory_mb = 13500
+max_pixels = 4_194_304
+size_multiple = 32
+extra_args = ["--fa"]
+# Final-asset quality: official 40 steps, cfg 1.0, no step caching (~2x the time of 20 steps).
+defaults = { width = 1024, height = 1024, steps = 40, cfg_scale = 1.0, sampler = "euler" }
+
+[models.files]
+diffusion_model = { hf_repo = "leejet/Qwen-Image-2.1-GGUF", hf_file = "qwen_image_2.1-Q8_0.gguf", size_mb = 7690 }
+llm = { hf_repo = "Qwen/Qwen3-VL-8B-Instruct-GGUF", hf_file = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", size_mb = 5030 }
+vae = { hf_repo = "Comfy-Org/Qwen-Image-2.1", hf_file = "vae/qwen_image_2.1_vae_bf16.safetensors", size_mb = 680 }
+
+[models.edit_files]
+llm_vision = { hf_repo = "Qwen/Qwen3-VL-8B-Instruct-GGUF", hf_file = "mmproj-Qwen3VL-8B-Instruct-F16.gguf", size_mb = 1160 }

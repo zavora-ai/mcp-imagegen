@@ -1,0 +1,40 @@
+# mcp-imagegen configuration.
+# Location: $MCP_IMAGEGEN_CONFIG_DIR/config.toml, or ~/.config/mcp-imagegen/config.toml.
+# Written on first run; edit freely. `~` is expanded.
+
+# Where images go when a request gives no output_path / output_dir.
+default_output_dir = "~/Pictures/mcp-imagegen"
+# Images may only be written under these roots (default_output_dir must be inside one).
+allowed_output_roots = ["~/Pictures/mcp-imagegen"]
+
+# edit_image inputs may only be read from these roots (default: allowed_output_roots).
+# allowed_input_roots = ["~/Pictures/mcp-imagegen"]
+# Input limits for edit_image.
+max_input_bytes = 33554432
+max_input_side = 4096
+
+# Unload models after this many seconds without jobs.
+idle_unload_secs = 300
+# Jobs waiting behind the running one before generate_image returns QueueFull.
+max_queue = 4
+# How long finished job results stay queryable with get_job.
+job_ttl_secs = 3600
+# Free memory that must remain after loading a model (MB).
+memory_headroom_mb = 2048
+
+# Hugging Face hub cache used to resolve hf_repo/hf_file entries in models.toml.
+# Defaults to $HF_HUB_CACHE, then $HF_HOME/hub, then ~/.cache/huggingface/hub.
+# hf_cache_dir = "~/.cache/huggingface/hub"
+
+[backends.sdcpp]
+# stable-diffusion.cpp server binary (name on PATH or absolute path).
+server_bin = "sd-server"
+# Arguments added to every sd-server launch; models can add their own `extra_args`.
+extra_args = []
+startup_timeout_secs = 180
+# LoRA folder (--lora-model-dir). Defaults to <config dir>/loras.
+# lora_dir = "~/.config/mcp-imagegen/loras"
+
+[backends.mflux]
+# Directory holding the mflux-generate-* entry points (uv tool install mflux). Empty = search PATH.
+bin_dir = "~/.local/bin"

@@ -1,0 +1,54 @@
+server_id = "mcp_imagegen"
+display_name = "Image Generation MCP Server"
+version = "0.1.0"
+domain = "media"
+sdk_version = "0.3.0"
+risk_level = "low"
+# Writes only inside the configured allowed_output_roots.
+writes_allowed = "gated"
+transports = ["stdio"]
+credentials = []
+governance_gates = []
+environments = ["development"]
+
+[[tools]]
+name = "generate_image"
+description = "Generate an image from a text prompt with a local model and write it as PNG"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "edit_image"
+description = "Edit one or more existing images from an instruction with a local model and write a new PNG"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "get_job"
+description = "Get status, progress and result of a generation job"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "cancel_job"
+description = "Cancel a queued or running generation job"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "list_models"
+description = "List configured models with backend, license and readiness status"
+risk_class = "read_only"
+requires_approval = false
+credential_bindings = []
+
+[[tools]]
+name = "unload_models"
+description = "Unload all loaded models and stop backend processes to free memory"
+risk_class = "internal_write"
+requires_approval = false
+credential_bindings = []

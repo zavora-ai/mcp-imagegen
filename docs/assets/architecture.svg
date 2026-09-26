@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 430" font-family="Inter, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="900" height="430" fill="#ffffff"/>
+
+  <!-- client -->
+  <rect x="20" y="160" width="150" height="90" rx="10" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="95" y="195" text-anchor="middle" font-size="15" font-weight="600" fill="#312e81">MCP client</text>
+  <text x="95" y="216" text-anchor="middle" font-size="12" fill="#4338ca">Claude Code, agents</text>
+  <text x="95" y="234" text-anchor="middle" font-size="11" fill="#6366f1">stdio · Tasks</text>
+
+  <!-- server -->
+  <rect x="215" y="30" width="420" height="370" rx="12" fill="#f8fafc" stroke="#334155"/>
+  <text x="425" y="58" text-anchor="middle" font-size="16" font-weight="700" fill="#0f172a">mcp-imagegen</text>
+
+  <rect x="240" y="72" width="370" height="54" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="425" y="91" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">Tools</text>
+  <text x="425" y="106" text-anchor="middle" font-size="11" fill="#475569">generate_image · edit_image · get_job</text>
+  <text x="425" y="120" text-anchor="middle" font-size="11" fill="#475569">cancel_job · list_models · unload_models</text>
+
+  <rect x="240" y="135" width="175" height="70" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="327" y="158" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">Validation</text>
+  <text x="327" y="176" text-anchor="middle" font-size="11" fill="#475569">registry · HF cache lookup</text>
+  <text x="327" y="192" text-anchor="middle" font-size="11" fill="#475569">input jail · memory pre-flight</text>
+
+  <rect x="435" y="135" width="175" height="70" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="522" y="158" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">Job manager</text>
+  <text x="522" y="176" text-anchor="middle" font-size="11" fill="#475569">1 worker · bounded queue</text>
+  <text x="522" y="192" text-anchor="middle" font-size="11" fill="#475569">cancel · TTL · idle unload</text>
+
+  <rect x="240" y="220" width="370" height="60" rx="8" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="425" y="244" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">ImageBackend trait</text>
+  <text x="425" y="263" text-anchor="middle" font-size="11" fill="#475569">availability · generate(progress, cancel) · unload</text>
+
+  <rect x="240" y="295" width="175" height="46" rx="8" fill="#f1f5f9" stroke="#94a3b8" stroke-dasharray="4 3"/>
+  <text x="327" y="316" text-anchor="middle" font-size="13" font-weight="600" fill="#334155">mflux · others</text>
+  <text x="327" y="332" text-anchor="middle" font-size="11" fill="#64748b">feature-flagged</text>
+
+  <rect x="435" y="295" width="175" height="46" rx="8" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="522" y="316" text-anchor="middle" font-size="13" font-weight="600" fill="#065f46">sdcpp (default)</text>
+  <text x="522" y="332" text-anchor="middle" font-size="11" fill="#047857">sd-server child process</text>
+
+  <rect x="240" y="350" width="370" height="42" rx="8" fill="#fff7ed" stroke="#f59e0b"/>
+  <text x="425" y="367" text-anchor="middle" font-size="11" fill="#92400e">Output: atomic PNG + sidecar JSON inside allowed roots</text>
+  <text x="425" y="383" text-anchor="middle" font-size="11" fill="#92400e">(seed, params, license, input SHA-256)</text>
+
+  <!-- engine -->
+  <rect x="680" y="250" width="200" height="120" rx="10" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="780" y="278" text-anchor="middle" font-size="15" font-weight="600" fill="#065f46">stable-diffusion.cpp</text>
+  <text x="780" y="298" text-anchor="middle" font-size="12" fill="#047857">sd-server · Metal / CUDA</text>
+  <text x="780" y="318" text-anchor="middle" font-size="11" fill="#047857">/sdcpp/v1/img_gen · jobs</text>
+  <text x="780" y="338" text-anchor="middle" font-size="11" fill="#047857">Qwen-Image-2.1 (GGUF)</text>
+  <text x="780" y="356" text-anchor="middle" font-size="11" fill="#047857">+ vision weights for edits</text>
+
+  <!-- HF cache -->
+  <rect x="680" y="80" width="200" height="80" rx="10" fill="#fefce8" stroke="#eab308"/>
+  <text x="780" y="108" text-anchor="middle" font-size="15" font-weight="600" fill="#713f12">Hugging Face cache</text>
+  <text x="780" y="128" text-anchor="middle" font-size="11" fill="#854d0e">weights resolved by repo/file</text>
+  <text x="780" y="145" text-anchor="middle" font-size="11" fill="#854d0e">never auto-downloaded</text>
+
+  <line x1="170" y1="205" x2="238" y2="205" stroke="#64748b" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="610" y1="318" x2="678" y2="310" stroke="#64748b" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="612" y1="170" x2="678" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#a)" stroke-dasharray="5 4"/>
+</svg>
