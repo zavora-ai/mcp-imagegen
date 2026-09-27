@@ -28,6 +28,7 @@ pub struct Config {
     pub hf_cache_dir: PathBuf,
     pub sdcpp: SdcppConfig,
     pub mflux: MfluxConfig,
+    pub codex: CodexConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +47,20 @@ pub struct SdcppConfig {
 pub struct MfluxConfig {
     /// Directory with mflux-generate-* entry points; `None` searches PATH.
     pub bin_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexConfig {
+    /// The Codex CLI; a bare name is looked up on PATH (with PATHEXT on Windows).
+    pub bin: PathBuf,
+    /// Where Codex keeps its state and saves images (`generated_images/<thread>/`).
+    pub codex_home: PathBuf,
+    /// A run longer than this is killed and reported as failed.
+    pub timeout_secs: u64,
+    /// Added to every `codex exec` call, before per-model arguments.
+    pub extra_args: Vec<String>,
+    /// Working directory for `codex exec -C` (read-only sandbox, so nothing is written there).
+    pub work_dir: PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -70,6 +85,17 @@ struct RawConfig {
 struct RawBackends {
     sdcpp: Option<RawSdcpp>,
     mflux: Option<RawMflux>,
+    codex: Option<RawCodex>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCodex {
+    bin: Option<String>,
+    codex_home: Option<String>,
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    extra_args: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +199,28 @@ impl Config {
                 .unwrap_or_else(|| dir.join("loras")),
             work_dir: dir.join(".sdcpp"),
         };
+        let raw_codex = raw.backends.codex.unwrap_or_default();
+        let codex_timeout = raw_codex.timeout_secs.unwrap_or(600);
+        if codex_timeout == 0 {
+            return Err("backends.codex.timeout_secs must be at least 1".into());
+        }
+        let codex = CodexConfig {
+            bin: expand_tilde(
+                raw_codex
+                    .bin
+                    .as_deref()
+                    .filter(|b| !b.trim().is_empty())
+                    .unwrap_or("codex"),
+            ),
+            codex_home: raw_codex
+                .codex_home
+                .filter(|d| !d.trim().is_empty())
+                .map(|d| expand_tilde(&d))
+                .unwrap_or_else(default_codex_home),
+            timeout_secs: codex_timeout,
+            extra_args: raw_codex.extra_args,
+            work_dir: dir.join(".codex-work"),
+        };
         let mflux = MfluxConfig {
             bin_dir: raw
                 .backends
@@ -199,6 +247,7 @@ impl Config {
                 .unwrap_or_else(default_hf_cache),
             sdcpp,
             mflux,
+            codex,
         })
     }
 
@@ -216,6 +265,14 @@ pub fn default_hf_cache() -> PathBuf {
         return expand_tilde(&home.to_string_lossy()).join("hub");
     }
     home_dir().join(".cache").join("huggingface").join("hub")
+}
+
+/// `$CODEX_HOME`, else `~/.codex` (what the Codex CLI itself uses).
+pub fn default_codex_home() -> PathBuf {
+    match non_empty_env("CODEX_HOME") {
+        Some(dir) => expand_tilde(&dir),
+        None => home_dir().join(".codex"),
+    }
 }
 
 fn non_empty_env(key: &str) -> Option<String> {
@@ -288,6 +345,28 @@ mod tests {
         let err = Config::from_toml(Path::new("/cfg"), "max_qeue = 3\n").unwrap_err();
         assert!(err.contains("max_qeue"), "{err}");
         assert!(err.contains("line 1"), "{err}");
+    }
+
+    #[test]
+    fn codex_section_defaults_and_overrides() {
+        let cfg = Config::from_toml(Path::new("/cfg"), "").unwrap();
+        assert_eq!(cfg.codex.bin, PathBuf::from("codex"));
+        assert_eq!(cfg.codex.timeout_secs, 600);
+        assert_eq!(cfg.codex.codex_home, default_codex_home());
+        assert_eq!(cfg.codex.work_dir, PathBuf::from("/cfg/.codex-work"));
+
+        let cfg = Config::from_toml(
+            Path::new("/cfg"),
+            "[backends.codex]\nbin = \"/opt/codex\"\ncodex_home = \"/data/codex\"\ntimeout_secs = 90\nextra_args = [\"--disable\", \"browser_use\"]\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.codex.bin, PathBuf::from("/opt/codex"));
+        assert_eq!(cfg.codex.codex_home, PathBuf::from("/data/codex"));
+        assert_eq!(cfg.codex.timeout_secs, 90);
+        assert_eq!(cfg.codex.extra_args, vec!["--disable", "browser_use"]);
+        assert!(
+            Config::from_toml(Path::new("/cfg"), "[backends.codex]\ntimeout_secs = 0\n").is_err()
+        );
     }
 
     #[test]

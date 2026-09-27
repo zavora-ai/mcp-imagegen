@@ -82,3 +82,32 @@ vae = { hf_repo = "Comfy-Org/Qwen-Image-2.1", hf_file = "vae/qwen_image_2.1_vae_
 
 [models.edit_files]
 llm_vision = { hf_repo = "Qwen/Qwen3-VL-8B-Instruct-GGUF", hf_file = "mmproj-Qwen3VL-8B-Instruct-F16.gguf", size_mb = 1160 }
+
+# ---- Cloud models through the Codex CLI (backend "codex"; see [backends.codex] in config.toml) ----
+# The image comes from Codex's built-in image tool; `codex.model` is only the agent that calls it.
+# With a ChatGPT sign-in, gpt-6-astra and the gpt-5.6 models were accepted on Codex 0.153 (gpt-6-luna/terra/sol were not).
+# No seed, steps or CFG: they're ignored with a warning. Sizes snap to square / 2:3 portrait / 3:2 landscape.
+
+[[models]]
+id = "codex-image"
+backend = "codex"
+capabilities = ["txt2img", "edit"]
+max_ref_images = 3
+license = "OpenAI terms of use (outputs assigned to the user; check before shipping)"
+commercial_outputs = true
+max_pixels = 4_194_304
+size_multiple = 16
+defaults = { width = 1024, height = 1024, steps = 1, cfg_scale = 1.0 }
+codex = { model = "gpt-5.6-terra", reasoning_effort = "low" }
+
+[[models]]
+id = "codex-image-astra"
+backend = "codex"
+capabilities = ["txt2img", "edit"]
+max_ref_images = 3
+license = "OpenAI terms of use (outputs assigned to the user; check before shipping)"
+commercial_outputs = true
+max_pixels = 4_194_304
+size_multiple = 16
+defaults = { width = 1024, height = 1024, steps = 1, cfg_scale = 1.0 }
+codex = { model = "gpt-6-astra", reasoning_effort = "low" }

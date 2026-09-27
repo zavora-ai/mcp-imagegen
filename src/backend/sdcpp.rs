@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
+use super::process::find_executable;
 use super::{
     Availability, BackendError, GeneratedImage, ImageBackend, Phase, ProgressSink, Timings,
 };
@@ -268,8 +269,9 @@ impl ImageBackend for SdcppBackend {
                 timings.load_ms.get_or_insert(load_ms);
                 Ok(GeneratedImage {
                     png,
-                    seed: request.seed,
+                    seed: Some(request.seed),
                     timings,
+                    ..Default::default()
                 })
             }
             Err(RunError::Cancelled { needs_kill }) => {
@@ -560,29 +562,6 @@ pub fn kill_stale_child(pid_file: &Path, expected_name: &str) -> Option<u32> {
 fn free_port() -> std::io::Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     Ok(listener.local_addr()?.port())
-}
-
-/// Resolve a binary name against PATH, or check an explicit path. On Windows, `PATHEXT`
-/// extensions (`.exe`, …) are tried too, so `sd-server` finds `sd-server.exe`.
-pub fn find_executable(bin: &Path) -> Option<PathBuf> {
-    let candidates = |p: &Path| -> Vec<PathBuf> {
-        let mut out = vec![p.to_path_buf()];
-        if cfg!(windows) && p.extension().is_none() {
-            let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT".into());
-            out.extend(
-                exts.split(';')
-                    .filter(|e| !e.is_empty())
-                    .map(|e| p.with_extension(e.trim_start_matches('.').to_ascii_lowercase())),
-            );
-        }
-        out
-    };
-    if bin.components().count() > 1 || bin.is_absolute() {
-        return candidates(bin).into_iter().find(|p| p.is_file());
-    }
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .flat_map(|dir| candidates(&dir.join(bin)))
-        .find(|p| p.is_file())
 }
 
 static SAMPLING_RE: LazyLock<Regex> =
@@ -911,26 +890,6 @@ mod tests {
         assert_eq!(m.timings.sample_ms, Some(1500));
         assert!(m.tail.iter().any(|l| l.contains("something broke")));
         assert!(!m.tail.iter().any(|l| l.contains("2/8")));
-    }
-
-    #[test]
-    fn find_executable_checks_paths() {
-        let here = std::env::current_exe().unwrap();
-        assert_eq!(find_executable(&here), Some(here.clone()));
-        let dir = here.parent().unwrap();
-        let name = here.file_stem().unwrap();
-        // Bare name on a PATH that contains the directory (PATHEXT handles .exe on Windows).
-        let old = std::env::var_os("PATH");
-        // SAFETY: tests in this module don't read PATH concurrently.
-        unsafe { std::env::set_var("PATH", dir) };
-        let found = find_executable(Path::new(name));
-        match old {
-            Some(p) => unsafe { std::env::set_var("PATH", p) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
-        assert!(found.is_some());
-        assert!(find_executable(Path::new("/definitely/not/here/sd-server")).is_none());
-        assert!(find_executable(Path::new("no-such-binary-xyz")).is_none());
     }
 
     // ---- stub sd-server: canned HTTP responses keyed by "METHOD path" ----

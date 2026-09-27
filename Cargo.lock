@@ -886,13 +886,14 @@ dependencies = [
 
 [[package]]
 name = "mcp-imagegen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "adk-mcp-sdk",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "image",
+ "libc",
  "rand 0.9.5",
  "regex",
  "reqwest",

@@ -15,6 +15,10 @@ The current model family is **[Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-
 strong text rendering), for text-to-image and instruction-based editing with up to 3 reference images. The default
 preset adds Viggle's 6-step turbo LoRA. It runs on **macOS, Linux and Windows**, on Metal, CUDA, Vulkan or CPU.
 
+Optionally, **cloud models** run beside the local ones through the [Codex CLI](https://github.com/openai/codex)'s
+built-in image tool (OpenAI's image model; a ChatGPT sign-in is enough, no API key). They use no local memory, take about
+a minute, and are marked `runs: "cloud"` so agents know the prompt leaves the machine. See [Cloud models](#cloud-models-codex-cli).
+
 ## Example outputs
 
 <table>
@@ -38,14 +42,16 @@ preset adds Viggle's 6-step turbo LoRA. It runs on **macOS, Linux and Windows**,
   <img src="https://raw.githubusercontent.com/zavora-ai/mcp-imagegen/main/docs/assets/architecture.svg" alt="mcp-imagegen architecture" width="850"/>
 </p>
 
-- **Backends** implement one trait (`availability`, `generate` with progress and cancel, `unload`). Each is behind a Cargo
-  feature: `sdcpp` (default) drives an `sd-server` child process through its native async job API, and `mock` is for tests.
+- **Backends** implement one trait (`availability`, `generate` with progress and cancel, `unload`, and where they `run`). Each is
+  behind a Cargo feature: `sdcpp` (default) drives an `sd-server` child process through its native async job API, `codex`
+  (default) runs `codex exec` per job for cloud generation, and `mock` is for tests.
 - **Model registry** (`models.toml`): adding a model on an existing backend is config only. Weights resolve from the
   Hugging Face cache by `hf_repo` + `hf_file` (newest snapshot) or an explicit `path`. The server **never downloads**.
   `list_models` prints the exact `hf download` command and size for anything missing.
-- **Job manager**: a single worker, a bounded FIFO queue, cancel for queued or running jobs, result TTL, and idle unload.
+- **Job manager**: two lanes (local and cloud), each with one worker and a bounded FIFO queue, so a cloud image never waits
+  behind a local render. Cancel for queued or running jobs, result TTL, and idle unload of local models.
 - **Safety**: output and input paths are jailed to configured roots. Writes are atomic (`.tmp` + rename) and never overwrite.
-  Inputs are format-sniffed, size-limited and fingerprinted (SHA-256). A free-memory check refuses to load a model that
+  Inputs are format-sniffed, size-limited and fingerprinted (SHA-256). A free-memory check refuses to load a local model that
   would push the machine into swap. An orphaned `sd-server` from a crashed run is reaped at startup.
 
 ## Tools (6)
@@ -56,16 +62,17 @@ preset adds Viggle's 6-step turbo LoRA. It runs on **macOS, Linux and Windows**,
 | `edit_image` | Edit 1–N existing images from an instruction (recolour, add/remove details, variations, combine references) | internal_write |
 | `get_job` | Status, progress (`loading model`, `sampling 5/20`, `decoding`) and result of a job | read_only |
 | `cancel_job` | Cancel a queued or running job. No partial files are left behind | internal_write |
-| `list_models` | Readiness (`ready` / `missing_files` + fetch command / `backend_unavailable`), edit readiness, license, commercial flag | read_only |
-| `unload_models` | Stop backend processes and free memory now | internal_write |
+| `list_models` | Readiness (`ready` / `missing_files` + fetch command / `backend_unavailable`), edit readiness, where it runs (`local` / `cloud` + provider), license, commercial flags | read_only |
+| `unload_models` | Stop local backend processes and free memory now (cloud jobs don't block it) | internal_write |
 
 Long jobs: `generate_image` and `edit_image` run as protocol-native **MCP Tasks** for clients that support them, block
 for legacy clients (Claude Code backgrounds calls over two minutes automatically), and accept `wait: false`, which
 returns a `job_id` to poll with `get_job`.
 
-Every image gets a sidecar JSON with the model, backend, license, prompt, seed, size, steps, CFG, sampler, backend options,
-timings, and for edits, each reference's path, size and SHA-256. Same seed + same inputs + same backend gives identical pixels
-(verified by the live tests).
+Every image gets a sidecar JSON with the model, backend, where it ran, license, prompt, seed, the image's real size, steps, CFG,
+sampler, backend options, timings, backend provenance (for Codex: version, agent model, thread id, source file, token usage), and
+for edits, each reference's path, size and SHA-256. Same seed + same inputs + same local backend gives identical pixels (verified
+by the live tests). Cloud models have no seed (`"seed": null`).
 
 ## Install
 
@@ -141,15 +148,45 @@ server_bin = "~/stable-diffusion.cpp/build/bin/sd-server"   # or just "sd-server
 | `qwen-image-2.1-turbo` | **Default.** Fastest and sharpest | [Viggle turbo LoRA](https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo): 6 fixed steps, cfg 1.0, resolution-shifted sigma schedule | Qwen Research License |
 | `qwen-image-2.1` | No LoRA | 20 steps, cfg 1.0, EasyCache step caching | Qwen Research License |
 | `qwen-image-2.1-hq` | Reference quality | 40 steps (official), cfg 1.0, no caching | Qwen Research License |
+| `codex-image` | Cloud, fast, strong prompt following | Codex agent `gpt-5.6-terra`, reasoning effort low | OpenAI terms (outputs assigned to the user) |
+| `codex-image-astra` | Cloud, same image tool | Codex agent `gpt-6-astra` | OpenAI terms |
 
-All three support `edit_image` with up to 3 references once the vision weights are present. Models can declare `loras` and a
+The Qwen presets support `edit_image` with up to 3 references once the vision weights are present; the Codex ones always do. Models can declare `loras` and a
 `sigma_schedule` in `models.toml`. Because stable-diffusion.cpp uses custom sigmas verbatim, the server applies the model's
 resolution-dependent time shift itself.
 
 **License note.** Qwen-Image-2.1's weights are under the Qwen Research License (non-commercial). The Qwen team has stated
 that model outputs are not part of the licensed Materials and that users keep the rights to what they generate. Check the
 [model card](https://huggingface.co/Qwen/Qwen-Image-2.1) for the current terms before shipping generated assets.
-`list_models` reports `commercial_weights` for every model so agents can check.
+`list_models` reports `commercial_weights` for every local model (and `commercial_outputs` where the terms speak about outputs) so agents can check.
+
+## Cloud models (Codex CLI)
+
+Install the [Codex CLI](https://github.com/openai/codex) and sign in once (`codex login`; a ChatGPT account works without an API
+key). `list_models` then shows the `codex-*` models as `ready`; it checks with `codex login status`, which spends no quota.
+
+```toml
+# config.toml (defaults shown)
+[backends.codex]
+bin = "codex"            # codex.cmd / codex.exe are found on Windows
+# codex_home = "~/.codex" # default: $CODEX_HOME, else ~/.codex
+timeout_secs = 600
+```
+
+How a job runs: `codex exec --json --skip-git-repo-check -s read-only -m <agent model>` with a fixed instruction on stdin
+("use your image generation tool exactly once… don't run commands or touch files") and, for edits, the reference images attached
+with `--image`. The image is read from `<codex_home>/generated_images/<thread_id>/`, where the thread id comes from Codex's own
+event stream, never from the agent's reply. Cancelling kills the whole Codex process tree.
+
+- **Privacy:** prompts and reference images go to OpenAI. `list_models` says so per model (`provider`, `privacy`).
+- **Cost:** it spends the signed-in account's quota. A 1536×1024 image took **45 s** and about 33k input tokens (19k cached) with
+  `gpt-5.6-terra` on Codex 0.153.
+- **Sizes:** the request picks square (1024×1024 requested, Codex returns 1254×1254), 2:3 portrait (1024×1536) or 3:2 landscape
+  (1536×1024). The result reports the real size, with a warning when it differs.
+- **Agent models:** with a ChatGPT sign-in on Codex 0.153, `gpt-6-astra` and the `gpt-5.6-*` models were accepted, and
+  `gpt-6-luna`, `gpt-6-terra` and `gpt-6-sol` were rejected even though Codex lists them. The server always passes the
+  registry's model, so your own Codex default doesn't matter.
+- **No seed, steps or CFG:** passing them is allowed and ignored with a warning.
 
 ## Performance
 
@@ -179,7 +216,12 @@ cargo test --all-features   # unit + protocol tests over stdio with the mock bac
 # Live tests against real weights (ignored by default)
 MCP_IMAGEGEN_SD_SERVER=/path/to/sd-server \
   cargo test --release --test sdcpp_live -- --ignored --nocapture
+
+# Live Codex test (spends quota; needs `codex login`)
+cargo test --test codex_live -- --ignored --nocapture
 ```
+
+Codex behaviour in CI is covered by `fake-codex`, a stand-in binary built only with the `mock` feature.
 
 CI runs fmt, clippy (`-D warnings`), tests on Linux, macOS and Windows, and an MSRV build.
 

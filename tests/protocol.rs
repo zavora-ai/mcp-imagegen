@@ -58,9 +58,11 @@ fn env() -> Env {
     std::fs::write(
         cfg.join("config.toml"),
         format!(
-            "default_output_dir = {out:?}\nallowed_output_roots = [{out:?}]\nmemory_headroom_mb = 0\nhf_cache_dir = {cache:?}\n",
+            "default_output_dir = {out:?}\nallowed_output_roots = [{out:?}]\nmemory_headroom_mb = 0\nhf_cache_dir = {cache:?}\n\n[backends.codex]\nbin = {codex:?}\ncodex_home = {codex_home:?}\n",
             out = out.to_str().unwrap(),
             cache = dir.path().join("hf").to_str().unwrap(),
+            codex = env!("CARGO_BIN_EXE_fake-codex"),
+            codex_home = dir.path().join("codex-home").to_str().unwrap(),
         ),
     )
     .unwrap();
@@ -102,6 +104,18 @@ size_multiple = 16
 defaults = { width = 512, height = 512, steps = 8, cfg_scale = 1.0 }
 [models.files]
 diffusion_model = { hf_repo = "org/model-GGUF", hf_file = "model-Q8_0.gguf", size_mb = 7000 }
+
+[[models]]
+id = "cloud-fake"
+backend = "codex"
+capabilities = ["txt2img", "edit"]
+max_ref_images = 3
+license = "OpenAI terms of use"
+commercial_outputs = true
+max_pixels = 4194304
+size_multiple = 16
+defaults = { width = 1024, height = 1024, steps = 1, cfg_scale = 1.0 }
+codex = { model = "gpt-5.6-terra", reasoning_effort = "low" }
 "#,
     )
     .unwrap();
@@ -371,9 +385,10 @@ async fn edit_image_round_trip_and_rejections() {
     assert_eq!(v["status"], "done");
     assert_eq!(v["mode"], "edit");
     assert!(v["path"].as_str().unwrap().contains("paint-it-red-edit-2"));
+    // Output size defaults to the source's (the mock renders at the requested 64x64).
     assert_eq!(
         (v["width"].as_u64(), v["height"].as_u64()),
-        (Some(32), Some(32))
+        (Some(64), Some(64))
     );
     let refs = v["references"].as_array().unwrap();
     assert_eq!(refs.len(), 1);
@@ -435,6 +450,68 @@ async fn edit_image_round_trip_and_rejections() {
     assert_eq!(editor["edit"]["max_images"], 2);
     let plain = models.iter().find(|m| m["id"] == "mock-model").unwrap();
     assert_eq!(plain["edit"]["status"], "unsupported");
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_model_is_listed_as_cloud_and_generates() {
+    let env = env();
+    let client = spawn(LegacyClient, &env).await;
+
+    let listed = client
+        .call_tool(call("list_models", json!({})))
+        .await
+        .unwrap();
+    let models = sc(&listed)["models"].as_array().unwrap().clone();
+    let cloud = models.iter().find(|m| m["id"] == "cloud-fake").unwrap();
+    assert_eq!(cloud["runs"], "cloud");
+    assert_eq!(cloud["status"], "ready");
+    assert_eq!(cloud["provider"], "OpenAI, through Codex CLI");
+    assert_eq!(cloud["commercial_outputs"], true);
+    assert_eq!(cloud["agent_model"], "gpt-5.6-terra");
+    assert!(cloud.get("commercial_weights").is_none());
+    assert_eq!(cloud["edit"]["status"], "ready");
+    let local = models.iter().find(|m| m["id"] == "mock-model").unwrap();
+    assert_eq!(local["runs"], "local");
+    assert_eq!(local["commercial_weights"], true);
+
+    let done = client
+        .call_tool(args(json!({
+            "prompt": "a crate",
+            "model": "cloud-fake",
+            "width": 1536,
+            "height": 1024,
+            "seed": 3
+        })))
+        .await
+        .unwrap();
+    let v = sc(&done);
+    assert_eq!(v["status"], "done", "{v}");
+    assert_eq!(v["runs"], "cloud");
+    assert!(v["seed"].is_null());
+    assert_eq!(
+        (v["width"].as_u64(), v["height"].as_u64()),
+        (Some(48), Some(32))
+    );
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("`seed` is ignored"))
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("returned 48x32"))
+    );
+    assert!(
+        v["backend_details"]["thread_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("fake-")
+    );
+    assert!(std::path::Path::new(v["path"].as_str().unwrap()).exists());
 
     client.cancel().await.unwrap();
 }

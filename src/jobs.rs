@@ -1,8 +1,10 @@
-//! Job manager (design §7 steps 4–6; R4, R5).
+//! Job manager (design §7 steps 4–6, §13.4; R4, R5, R15).
 //!
-//! One worker runs jobs strictly one at a time from a bounded FIFO queue. Every job has a
-//! `watch` channel carrying its latest snapshot, so callers can wait, poll or stream progress.
-//! Finished jobs are kept for `job_ttl`; backends are unloaded after `idle_unload` without work.
+//! Two lanes, each with a bounded FIFO queue and one worker: local backends run strictly one job
+//! at a time, and so do cloud backends, but a cloud job never waits behind a local render.
+//! Every job has a `watch` channel carrying its latest snapshot, so callers can wait, poll or
+//! stream progress. Finished jobs are kept for `job_ttl`; local backends are unloaded after
+//! `idle_unload` without local work.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -14,7 +16,7 @@ use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::{BackendError, BackendRegistry, Phase, ProgressSink, Timings};
+use crate::backend::{BackendError, BackendRegistry, Phase, ProgressSink, Runs, Timings};
 use crate::error::ImageGenError;
 use crate::output;
 use crate::registry::ModelSpec;
@@ -25,6 +27,34 @@ pub struct JobConfig {
     pub max_queue: usize,
     pub job_ttl: Duration,
     pub idle_unload: Duration,
+}
+
+/// Which queue a job waits in, from its backend's `runs()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lane {
+    Local,
+    Cloud,
+}
+
+impl Lane {
+    const ALL: [Lane; 2] = [Lane::Local, Lane::Cloud];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Local => 0,
+            Self::Cloud => 1,
+        }
+    }
+}
+
+impl From<Runs> for Lane {
+    fn from(runs: Runs) -> Self {
+        match runs {
+            Runs::Local => Self::Local,
+            Runs::Cloud => Self::Cloud,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -48,12 +78,19 @@ impl JobStatus {
 pub struct GenerationRecord {
     pub model: String,
     pub backend: String,
+    pub runs: Runs,
     pub license: String,
-    pub commercial_weights: bool,
+    /// Local models only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commercial_weights: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commercial_outputs: Option<bool>,
     pub prompt: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub negative_prompt: String,
-    pub seed: u64,
+    /// `null` when the backend has no seeds.
+    pub seed: Option<u64>,
+    /// Actual pixels of the written image.
     pub width: u32,
     pub height: u32,
     pub steps: u32,
@@ -73,6 +110,9 @@ pub struct GenerationRecord {
     pub loras: Vec<crate::registry::LoraUse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_sigmas: Vec<f32>,
+    /// Backend provenance (e.g. Codex version, thread id, source file).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub backend_details: BTreeMap<String, serde_json::Value>,
     pub generator: String,
 }
 
@@ -118,6 +158,7 @@ pub struct JobRequest {
 
 struct JobEntry {
     tx: watch::Sender<JobSnapshot>,
+    lane: Lane,
     cancel: CancellationToken,
     request: Mutex<Option<JobRequest>>,
     finished_at: Mutex<Option<Instant>>,
@@ -141,11 +182,16 @@ impl JobEntry {
     }
 }
 
-struct Inner {
-    jobs: Mutex<HashMap<String, Arc<JobEntry>>>,
+#[derive(Default)]
+struct LaneState {
     queue: Mutex<VecDeque<String>>,
     running: Mutex<Option<String>>,
     wake: Notify,
+}
+
+struct Inner {
+    jobs: Mutex<HashMap<String, Arc<JobEntry>>>,
+    lanes: [LaneState; 2],
     backends: BackendRegistry,
     cfg: JobConfig,
 }
@@ -156,17 +202,17 @@ pub struct JobManager {
 }
 
 impl JobManager {
-    /// Create the manager and spawn its worker on the current tokio runtime.
+    /// Create the manager and spawn one worker per lane on the current tokio runtime.
     pub fn new(backends: BackendRegistry, cfg: JobConfig) -> Self {
         let inner = Arc::new(Inner {
             jobs: Mutex::new(HashMap::new()),
-            queue: Mutex::new(VecDeque::new()),
-            running: Mutex::new(None),
-            wake: Notify::new(),
+            lanes: Default::default(),
             backends,
             cfg,
         });
-        tokio::spawn(worker(Arc::downgrade(&inner)));
+        for lane in Lane::ALL {
+            tokio::spawn(worker(Arc::downgrade(&inner), lane));
+        }
         Self { inner }
     }
 
@@ -174,11 +220,18 @@ impl JobManager {
         &self.inner.backends
     }
 
-    /// Queue a job. Fails with `QueueFull` when `max_queue` jobs are already waiting.
+    /// Queue a job in its backend's lane. Fails with `QueueFull` when `max_queue` jobs are
+    /// already waiting in that lane.
     pub fn submit(&self, job: JobRequest) -> Result<JobSnapshot, ImageGenError> {
         self.prune();
         let id = new_job_id();
-        let mut queue = self.inner.queue.lock().unwrap();
+        let lane = self
+            .inner
+            .backends
+            .get(&job.model.backend)
+            .map(|b| Lane::from(b.runs()))
+            .unwrap_or(Lane::Local);
+        let mut queue = self.inner.lane(lane).queue.lock().unwrap();
         if queue.len() >= self.inner.cfg.max_queue {
             return Err(ImageGenError::QueueFull {
                 max: self.inner.cfg.max_queue,
@@ -196,6 +249,7 @@ impl JobManager {
         let (tx, _) = watch::channel(snapshot.clone());
         let entry = Arc::new(JobEntry {
             tx,
+            lane,
             cancel: CancellationToken::new(),
             request: Mutex::new(Some(job)),
             finished_at: Mutex::new(None),
@@ -203,7 +257,7 @@ impl JobManager {
         self.inner.jobs.lock().unwrap().insert(id.clone(), entry);
         queue.push_back(id);
         drop(queue);
-        self.inner.wake.notify_one();
+        self.inner.lane(lane).wake.notify_one();
         Ok(snapshot)
     }
 
@@ -234,7 +288,7 @@ impl JobManager {
     pub fn cancel(&self, id: &str) -> Result<JobSnapshot, ImageGenError> {
         let entry = self.entry(id)?;
         let removed = {
-            let mut queue = self.inner.queue.lock().unwrap();
+            let mut queue = self.inner.lane(entry.lane).queue.lock().unwrap();
             let before = queue.len();
             queue.retain(|q| q != id);
             before != queue.len()
@@ -243,26 +297,30 @@ impl JobManager {
         if removed {
             entry.request.lock().unwrap().take();
             entry.finish(JobStatus::Cancelled, None, None);
-            self.inner.renumber_queue();
+            self.inner.renumber_queue(entry.lane);
         }
         Ok(entry.snapshot())
     }
 
-    /// Jobs queued plus the one running.
+    /// Jobs queued plus running, across both lanes.
     pub fn busy(&self) -> usize {
-        self.inner.queue.lock().unwrap().len()
-            + usize::from(self.inner.running.lock().unwrap().is_some())
+        Lane::ALL.iter().map(|l| self.busy_in(*l)).sum()
     }
 
-    /// Unload every backend now. Refused while a job is running or queued.
+    /// Jobs queued plus the one running in `lane`.
+    pub fn busy_in(&self, lane: Lane) -> usize {
+        let state = self.inner.lane(lane);
+        state.queue.lock().unwrap().len() + usize::from(state.running.lock().unwrap().is_some())
+    }
+
+    /// Unload every backend now. Refused while a local job is running or queued; cloud jobs
+    /// hold no local memory, so they don't block it.
     pub async fn unload_all(&self) -> Result<Vec<String>, ImageGenError> {
-        if self.busy() > 0 {
+        let local = self.busy_in(Lane::Local);
+        if local > 0 {
             return Err(ImageGenError::invalid(
                 "unload_models",
-                format!(
-                    "{} job(s) queued or running; cancel them first or wait",
-                    self.busy()
-                ),
+                format!("{local} local job(s) queued or running; cancel them first or wait"),
             ));
         }
         Ok(self.inner.unload_all().await)
@@ -290,8 +348,12 @@ impl JobManager {
 }
 
 impl Inner {
-    fn renumber_queue(&self) {
-        let queue = self.queue.lock().unwrap();
+    fn lane(&self, lane: Lane) -> &LaneState {
+        &self.lanes[lane.index()]
+    }
+
+    fn renumber_queue(&self, lane: Lane) {
+        let queue = self.lane(lane).queue.lock().unwrap();
         let jobs = self.jobs.lock().unwrap();
         for (i, id) in queue.iter().enumerate() {
             if let Some(e) = jobs.get(id) {
@@ -311,11 +373,12 @@ impl Inner {
         unloaded
     }
 
-    fn next_job(&self) -> Option<(String, Arc<JobEntry>)> {
-        let id = self.queue.lock().unwrap().pop_front()?;
+    fn next_job(&self, lane: Lane) -> Option<(String, Arc<JobEntry>)> {
+        let state = self.lane(lane);
+        let id = state.queue.lock().unwrap().pop_front()?;
         let entry = self.jobs.lock().unwrap().get(&id).cloned()?;
-        *self.running.lock().unwrap() = Some(id.clone());
-        self.renumber_queue();
+        *state.running.lock().unwrap() = Some(id.clone());
+        self.renumber_queue(lane);
         Some((id, entry))
     }
 
@@ -343,10 +406,17 @@ impl Inner {
             return;
         };
 
-        // Only one model resident at a time across backends (R5).
-        for other in self.backends.all() {
-            if other.id() != backend.id() && other.loaded_model().is_some() {
-                other.unload().await;
+        // Only one local model resident at a time across backends (R5). Cloud jobs hold no local
+        // memory, so they never evict anything.
+        let runs = backend.runs();
+        if runs == Runs::Local {
+            for other in self.backends.all() {
+                if other.id() != backend.id()
+                    && other.runs() == Runs::Local
+                    && other.loaded_model().is_some()
+                {
+                    other.unload().await;
+                }
             }
         }
 
@@ -384,27 +454,40 @@ impl Inner {
 
         entry.tx.send_modify(|s| s.progress = Some(Phase::Saving));
         let req = &job.request;
+        let (width, height) =
+            output::image_dimensions(&image.png).unwrap_or((req.width, req.height));
+        let mut warnings = req.warnings.clone();
+        warnings.extend(image.warnings.iter().cloned());
+        if (width, height) != (req.width, req.height) {
+            warnings.push(format!(
+                "the backend returned {width}x{height} for the requested {}x{}",
+                req.width, req.height
+            ));
+        }
         let record = GenerationRecord {
             model: job.model.id.clone(),
             backend: backend_id.clone(),
+            runs,
             license: job.model.license.clone(),
-            commercial_weights: job.model.commercial_weights,
+            commercial_weights: (runs == Runs::Local).then_some(job.model.commercial_weights),
+            commercial_outputs: job.model.commercial_outputs,
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
             seed: image.seed,
-            width: req.width,
-            height: req.height,
+            width,
+            height,
             steps: req.steps,
             cfg_scale: req.cfg_scale,
             sampler: req.sampler.clone(),
             elapsed_ms: started.elapsed().as_millis() as u64,
             timings: image.timings.clone(),
-            warnings: req.warnings.clone(),
+            warnings,
             backend_options: job.model.backend_options.clone(),
             mode: req.mode,
             references: req.references.clone(),
             loras: req.loras.clone(),
             custom_sigmas: req.custom_sigmas.clone(),
+            backend_details: image.details.clone(),
             generator: format!("mcp-imagegen {}", env!("CARGO_PKG_VERSION")),
         };
         match output::write_image(&job.output, &image.png, &record) {
@@ -428,19 +511,20 @@ impl Inner {
     }
 }
 
-async fn worker(inner: std::sync::Weak<Inner>) {
+async fn worker(inner: std::sync::Weak<Inner>, lane: Lane) {
     let mut idle_armed = false;
     loop {
         let Some(this) = inner.upgrade() else { return };
-        if let Some((id, entry)) = this.next_job() {
+        if let Some((id, entry)) = this.next_job(lane) {
             this.run(&id, &entry).await;
-            *this.running.lock().unwrap() = None;
-            idle_armed = true;
+            *this.lane(lane).running.lock().unwrap() = None;
+            // Only local work leaves models resident, so only the local lane arms the idle unload.
+            idle_armed = lane == Lane::Local;
             continue;
         }
         let idle = this.cfg.idle_unload;
         let wake = async {
-            this.wake.notified().await;
+            this.lane(lane).wake.notified().await;
         };
         if idle_armed {
             tokio::select! {
@@ -494,9 +578,11 @@ mod tests {
                 cfg_scale: 1.0,
                 sampler: None,
             },
+            commercial_outputs: None,
             files: BTreeMap::new(),
             extra_args: vec![],
             mflux: None,
+            codex: None,
             backend_options: BTreeMap::new(),
             max_ref_images: 0,
             edit_files: BTreeMap::new(),
@@ -531,9 +617,17 @@ mod tests {
     }
 
     fn manager(max_queue: usize) -> (JobManager, Arc<MockBackend>) {
+        let (mgr, mock, _) = manager_with_cloud(max_queue);
+        (mgr, mock)
+    }
+
+    /// A local mock (`mock`) and a cloud-flavoured one (`mock-cloud`).
+    fn manager_with_cloud(max_queue: usize) -> (JobManager, Arc<MockBackend>, Arc<MockBackend>) {
         let mock = Arc::new(MockBackend::new(STEP));
+        let cloud = Arc::new(MockBackend::cloud(STEP));
         let mut backends = BackendRegistry::default();
         backends.insert(mock.clone());
+        backends.insert(cloud.clone());
         let mgr = JobManager::new(
             backends,
             JobConfig {
@@ -542,7 +636,15 @@ mod tests {
                 idle_unload: Duration::from_secs(5),
             },
         );
-        (mgr, mock)
+        (mgr, mock, cloud)
+    }
+
+    fn cloud_job(dir: &std::path::Path, name: &str, steps: u32) -> JobRequest {
+        let mut j = job(dir, name, steps);
+        j.model.id = "cloud-model".into();
+        j.model.backend = "mock-cloud".into();
+        j.model.commercial_outputs = Some(true);
+        j
     }
 
     async fn settle() {
@@ -570,7 +672,11 @@ mod tests {
         let rb = b_done.result.unwrap();
         assert!(ra.path.exists() && rb.path.exists());
         assert!(ra.sidecar_path.exists());
-        assert_eq!(rb.record.seed, 7);
+        assert_eq!(rb.record.seed, Some(7));
+        assert_eq!(rb.record.runs, Runs::Local);
+        assert_eq!(rb.record.commercial_weights, Some(true));
+        assert_eq!((rb.record.width, rb.record.height), (64, 64));
+        assert!(rb.record.warnings.is_empty(), "{:?}", rb.record.warnings);
         assert_eq!(rb.record.license, "MIT");
     }
 
@@ -692,5 +798,141 @@ mod tests {
         }
         // watch keeps only the latest value, so observers see a subset of steps.
         assert!(seen.iter().any(|s| s.starts_with("sampling ")), "{seen:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_job_runs_while_a_local_job_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, _, _) = manager_with_cloud(4);
+        let local = mgr.submit(job(dir.path(), "local", 50)).unwrap();
+        let cloud = mgr.submit(cloud_job(dir.path(), "cloud", 2)).unwrap();
+        settle().await;
+        // Both lanes start at once: the cloud job isn't queued behind the local one.
+        assert_eq!(mgr.get(&cloud.job_id).unwrap().status, JobStatus::Running);
+        let done = mgr.wait(&cloud.job_id).await.unwrap();
+        assert_eq!(done.status, JobStatus::Done);
+        assert_eq!(mgr.get(&local.job_id).unwrap().status, JobStatus::Running);
+        assert_eq!(mgr.busy_in(Lane::Local), 1);
+        assert_eq!(mgr.busy_in(Lane::Cloud), 0);
+
+        let r = done.result.unwrap().record;
+        assert_eq!(r.runs, Runs::Cloud);
+        assert_eq!(r.seed, None);
+        assert_eq!(r.commercial_weights, None);
+        assert_eq!(r.commercial_outputs, Some(true));
+        let sidecar: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("cloud.json")).unwrap()).unwrap();
+        assert!(sidecar["seed"].is_null());
+        assert_eq!(sidecar["runs"], "cloud");
+        assert!(sidecar.get("commercial_weights").is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_jobs_queue_in_their_own_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, _, _) = manager_with_cloud(1);
+        mgr.submit(job(dir.path(), "l1", 20)).unwrap();
+        mgr.submit(cloud_job(dir.path(), "c1", 20)).unwrap();
+        settle().await;
+        // One waiting job per lane is allowed with max_queue = 1.
+        mgr.submit(job(dir.path(), "l2", 1)).unwrap();
+        let c2 = mgr.submit(cloud_job(dir.path(), "c2", 1)).unwrap();
+        assert_eq!(c2.progress, Some(Phase::Queued { position: 1 }));
+        assert_eq!(
+            mgr.submit(cloud_job(dir.path(), "c3", 1))
+                .unwrap_err()
+                .code(),
+            "queue_full"
+        );
+        assert_eq!(mgr.busy(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cloud_jobs_never_unload_local_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, mock, _) = manager_with_cloud(4);
+        let a = mgr.submit(job(dir.path(), "a", 1)).unwrap();
+        mgr.wait(&a.job_id).await.unwrap();
+        assert!(mock.loaded_model().is_some());
+        let c = mgr.submit(cloud_job(dir.path(), "c", 1)).unwrap();
+        mgr.wait(&c.job_id).await.unwrap();
+        assert!(mock.loaded_model().is_some());
+        assert_eq!(mock.unloads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unload_allowed_while_only_cloud_jobs_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, mock, _) = manager_with_cloud(4);
+        let a = mgr.submit(job(dir.path(), "a", 1)).unwrap();
+        mgr.wait(&a.job_id).await.unwrap();
+        let c = mgr.submit(cloud_job(dir.path(), "c", 30)).unwrap();
+        settle().await;
+        assert_eq!(mgr.get(&c.job_id).unwrap().status, JobStatus::Running);
+        assert_eq!(
+            mgr.unload_all().await.unwrap(),
+            vec!["mock-model".to_string()]
+        );
+        assert_eq!(mock.unloads.load(Ordering::SeqCst), 1);
+        assert_eq!(mgr.wait(&c.job_id).await.unwrap().status, JobStatus::Done);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn size_mismatch_is_recorded_as_actual_with_a_warning() {
+        use crate::backend::{GeneratedImage, ImageBackend};
+        struct Fixed;
+        #[async_trait::async_trait]
+        impl ImageBackend for Fixed {
+            fn id(&self) -> &'static str {
+                "fixed"
+            }
+            async fn availability(&self) -> crate::backend::Availability {
+                crate::backend::Availability::Ready
+            }
+            async fn generate(
+                &self,
+                _: &ModelSpec,
+                _: &BTreeMap<String, PathBuf>,
+                _: &ResolvedRequest,
+                _: ProgressSink,
+                _: CancellationToken,
+            ) -> Result<GeneratedImage, BackendError> {
+                let mut details = BTreeMap::new();
+                details.insert("thread_id".to_string(), serde_json::json!("t-1"));
+                Ok(GeneratedImage {
+                    png: MockBackend::render_sized(1, 48, 32),
+                    warnings: vec!["from the backend".into()],
+                    details,
+                    ..Default::default()
+                })
+            }
+            async fn unload(&self) {}
+            fn loaded_model(&self) -> Option<String> {
+                None
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut backends = BackendRegistry::default();
+        backends.insert(Arc::new(Fixed));
+        let mgr = JobManager::new(
+            backends,
+            JobConfig {
+                max_queue: 2,
+                job_ttl: Duration::from_secs(10),
+                idle_unload: Duration::from_secs(5),
+            },
+        );
+        let mut j = job(dir.path(), "f", 1);
+        j.model.backend = "fixed".into();
+        let done = mgr.wait(&mgr.submit(j).unwrap().job_id).await.unwrap();
+        let r = done.result.unwrap().record;
+        assert_eq!((r.width, r.height), (48, 32));
+        assert_eq!(r.warnings[0], "from the backend");
+        assert!(
+            r.warnings[1].contains("returned 48x32 for the requested 64x64"),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(r.backend_details["thread_id"], "t-1");
     }
 }

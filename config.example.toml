@@ -38,3 +38,12 @@ startup_timeout_secs = 180
 [backends.mflux]
 # Directory holding the mflux-generate-* entry points (uv tool install mflux). Empty = search PATH.
 bin_dir = "~/.local/bin"
+
+[backends.codex]
+# Cloud image generation through the Codex CLI (`codex exec`), using its built-in image tool.
+# Needs Codex installed and signed in (`codex login`; a ChatGPT sign-in works without an API key).
+# Prompts and edit inputs are sent to OpenAI. Leave this section as is if you don't use Codex models.
+bin = "codex"                  # name on PATH (codex.cmd / codex.exe are found on Windows) or an absolute path
+# codex_home = "~/.codex"      # default: $CODEX_HOME, else ~/.codex; images are read from <codex_home>/generated_images
+timeout_secs = 600
+extra_args = []                # added to every `codex exec` call

@@ -24,20 +24,20 @@
   <rect x="240" y="135" width="175" height="70" rx="8" fill="#ffffff" stroke="#94a3b8"/>
   <text x="327" y="158" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">Validation</text>
   <text x="327" y="176" text-anchor="middle" font-size="11" fill="#475569">registry · HF cache lookup</text>
-  <text x="327" y="192" text-anchor="middle" font-size="11" fill="#475569">input jail · memory pre-flight</text>
+  <text x="327" y="192" text-anchor="middle" font-size="11" fill="#475569">input jail · memory pre-flight (local)</text>
 
   <rect x="435" y="135" width="175" height="70" rx="8" fill="#ffffff" stroke="#94a3b8"/>
   <text x="522" y="158" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">Job manager</text>
-  <text x="522" y="176" text-anchor="middle" font-size="11" fill="#475569">1 worker · bounded queue</text>
+  <text x="522" y="176" text-anchor="middle" font-size="11" fill="#475569">local + cloud job lanes</text>
   <text x="522" y="192" text-anchor="middle" font-size="11" fill="#475569">cancel · TTL · idle unload</text>
 
   <rect x="240" y="220" width="370" height="60" rx="8" fill="#ffffff" stroke="#94a3b8"/>
   <text x="425" y="244" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">ImageBackend trait</text>
   <text x="425" y="263" text-anchor="middle" font-size="11" fill="#475569">availability · generate(progress, cancel) · unload</text>
 
-  <rect x="240" y="295" width="175" height="46" rx="8" fill="#f1f5f9" stroke="#94a3b8" stroke-dasharray="4 3"/>
-  <text x="327" y="316" text-anchor="middle" font-size="13" font-weight="600" fill="#334155">mflux · others</text>
-  <text x="327" y="332" text-anchor="middle" font-size="11" fill="#64748b">feature-flagged</text>
+  <rect x="240" y="295" width="175" height="46" rx="8" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="327" y="316" text-anchor="middle" font-size="13" font-weight="600" fill="#1e3a8a">codex (cloud)</text>
+  <text x="327" y="332" text-anchor="middle" font-size="11" fill="#1d4ed8">codex exec · read-only sandbox</text>
 
   <rect x="435" y="295" width="175" height="46" rx="8" fill="#ecfdf5" stroke="#10b981"/>
   <text x="522" y="316" text-anchor="middle" font-size="13" font-weight="600" fill="#065f46">sdcpp (default)</text>
@@ -45,7 +45,14 @@
 
   <rect x="240" y="350" width="370" height="42" rx="8" fill="#fff7ed" stroke="#f59e0b"/>
   <text x="425" y="367" text-anchor="middle" font-size="11" fill="#92400e">Output: atomic PNG + sidecar JSON inside allowed roots</text>
-  <text x="425" y="383" text-anchor="middle" font-size="11" fill="#92400e">(seed, params, license, input SHA-256)</text>
+  <text x="425" y="383" text-anchor="middle" font-size="11" fill="#92400e">(seed, params, license, input SHA-256, provenance)</text>
+
+  <!-- cloud -->
+  <rect x="20" y="300" width="150" height="92" rx="10" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="95" y="325" text-anchor="middle" font-size="15" font-weight="600" fill="#1e3a8a">Codex CLI</text>
+  <text x="95" y="345" text-anchor="middle" font-size="12" fill="#1d4ed8">OpenAI image tool</text>
+  <text x="95" y="362" text-anchor="middle" font-size="11" fill="#1d4ed8">ChatGPT sign-in</text>
+  <text x="95" y="379" text-anchor="middle" font-size="11" fill="#1d4ed8">prompts leave the machine</text>
 
   <!-- engine -->
   <rect x="680" y="250" width="200" height="120" rx="10" fill="#ecfdf5" stroke="#10b981"/>
@@ -63,5 +70,6 @@
 
   <line x1="170" y1="205" x2="238" y2="205" stroke="#64748b" stroke-width="2" marker-end="url(#a)"/>
   <line x1="610" y1="318" x2="678" y2="310" stroke="#64748b" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="240" y1="318" x2="172" y2="340" stroke="#64748b" stroke-width="2" marker-end="url(#a)"/>
   <line x1="612" y1="170" x2="678" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#a)" stroke-dasharray="5 4"/>
 </svg>

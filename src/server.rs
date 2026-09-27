@@ -12,7 +12,7 @@ use rmcp::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::backend::{Availability, BackendRegistry};
+use crate::backend::{Availability, BackendRegistry, ImageBackend, Runs};
 use crate::config::Config;
 use crate::error::ImageGenError;
 use crate::input::InputPolicy;
@@ -57,6 +57,10 @@ pub fn default_backends(cfg: &Config) -> BackendRegistry {
     backends.insert(Arc::new(crate::backend::sdcpp::SdcppBackend::new(
         cfg.sdcpp.clone(),
     )));
+    #[cfg(feature = "codex")]
+    backends.insert(Arc::new(crate::backend::codex::CodexBackend::new(
+        cfg.codex.clone(),
+    )));
     #[cfg(feature = "mock")]
     {
         let step_ms = std::env::var("MCP_IMAGEGEN_MOCK_STEP_MS")
@@ -64,6 +68,9 @@ pub fn default_backends(cfg: &Config) -> BackendRegistry {
             .and_then(|v| v.parse().ok())
             .unwrap_or(50);
         backends.insert(Arc::new(crate::backend::mock::MockBackend::new(
+            Duration::from_millis(step_ms),
+        )));
+        backends.insert(Arc::new(crate::backend::mock::MockBackend::cloud(
             Duration::from_millis(step_ms),
         )));
     }
@@ -198,22 +205,25 @@ impl ImageGenServer {
                 fix,
             });
         }
-        let already_loaded = backend.loaded_model().as_deref() == Some(model.id.as_str());
-        let reclaimable_mb = st
-            .jobs
-            .backends()
-            .all()
-            .filter_map(|b| b.loaded_model())
-            .filter(|id| *id != model.id)
-            .filter_map(|id| st.registry.get(&id).ok().map(|m| m.est_memory_mb))
-            .sum();
-        memory::preflight(
-            model,
-            already_loaded,
-            reclaimable_mb,
-            st.cfg.memory_headroom_mb,
-            st.memory.as_ref(),
-        )?;
+        // Cloud backends use no local memory (R15).
+        if backend.runs() == Runs::Local {
+            let already_loaded = backend.loaded_model().as_deref() == Some(model.id.as_str());
+            let reclaimable_mb = st
+                .jobs
+                .backends()
+                .all()
+                .filter_map(|b| b.loaded_model())
+                .filter(|id| *id != model.id)
+                .filter_map(|id| st.registry.get(&id).ok().map(|m| m.est_memory_mb))
+                .sum();
+            memory::preflight(
+                model,
+                already_loaded,
+                reclaimable_mb,
+                st.cfg.memory_headroom_mb,
+                st.memory.as_ref(),
+            )?;
+        }
         st.jobs.submit(JobRequest {
             model: model.clone(),
             files,
@@ -280,7 +290,13 @@ impl ImageGenServer {
         }
     }
 
-    fn model_entry(&self, model: &ModelSpec, availability: &Availability, loaded: bool) -> Value {
+    fn model_entry(
+        &self,
+        model: &ModelSpec,
+        backend: Option<&dyn ImageBackend>,
+        availability: &Availability,
+        loaded: bool,
+    ) -> Value {
         let missing = model.missing_for_generation(&self.state.cfg.hf_cache_dir);
         let status = if !missing.is_empty() {
             "missing_files"
@@ -289,13 +305,14 @@ impl ImageGenServer {
         } else {
             "ready"
         };
+        let runs = backend.map(|b| b.runs()).unwrap_or_default();
         let mut entry = json!({
             "id": model.id,
             "backend": model.backend,
+            "runs": runs,
             "status": status,
             "loaded": loaded,
             "license": model.license,
-            "commercial_weights": model.commercial_weights,
             "capabilities": model.capabilities,
             "defaults": model.defaults,
             "size_multiple": model.size_multiple,
@@ -308,6 +325,19 @@ impl ImageGenServer {
                 .map(|l| l.file.hf_file.clone().or_else(|| l.file.path.clone()))
                 .collect::<Vec<_>>(),
         });
+        if runs == Runs::Local {
+            entry["commercial_weights"] = json!(model.commercial_weights);
+        }
+        if let Some(outputs) = model.commercial_outputs {
+            entry["commercial_outputs"] = json!(outputs);
+        }
+        if let Some(provider) = backend.and_then(|b| b.provider()) {
+            entry["provider"] = json!(provider);
+            entry["privacy"] = json!(format!("prompts and input images are sent to {provider}"));
+        }
+        if let Some(codex) = &model.codex {
+            entry["agent_model"] = json!(codex.model);
+        }
         if !missing.is_empty() {
             entry["missing_files"] = json!(missing.iter().map(missing_json).collect::<Vec<_>>());
             let total: u64 = missing.iter().filter_map(|m| m.size_mb).sum();
@@ -355,7 +385,7 @@ fn job_failure(snap: &JobSnapshot) -> CallToolResult {
 #[tool_router]
 impl ImageGenServer {
     #[tool(
-        description = "Generate an image from a text prompt with a local model and write it as PNG. Returns the file path, seed and all parameters. Large models can take minutes: pass wait=false to get a job_id and poll get_job."
+        description = "Generate an image from a text prompt and write it as PNG, with a local model or a cloud one (list_models shows `runs`; cloud models send the prompt to their provider). Returns the file path, seed (null for cloud models) and all parameters. Large local models can take minutes: pass wait=false to get a job_id and poll get_job."
     )]
     async fn generate_image(
         &self,
@@ -400,7 +430,7 @@ impl ImageGenServer {
     }
 
     #[tool(
-        description = "List configured models with backend, readiness (ready / missing_files with download commands / backend_unavailable), license and whether the weights allow commercial use. Never loads a model."
+        description = "List configured models with backend, where they run (local / cloud, with the provider for cloud), readiness (ready / missing_files with download commands / backend_unavailable), license and commercial-use flags. Never loads a model or spends cloud quota."
     )]
     async fn list_models(
         &self,
@@ -412,7 +442,8 @@ impl ImageGenServer {
             if input.backend.as_deref().is_some_and(|b| b != model.backend) {
                 continue;
             }
-            let (availability, loaded) = match st.jobs.backends().get(&model.backend) {
+            let backend = st.jobs.backends().get(&model.backend);
+            let (availability, loaded) = match &backend {
                 Some(b) => (
                     b.availability().await,
                     b.loaded_model().as_deref() == Some(model.id.as_str()),
@@ -425,7 +456,7 @@ impl ImageGenServer {
                     false,
                 ),
             };
-            models.push(self.model_entry(model, &availability, loaded));
+            models.push(self.model_entry(model, backend.as_deref(), &availability, loaded));
         }
         Ok(structured(json!({
             "models": models,
@@ -439,7 +470,7 @@ impl ImageGenServer {
     }
 
     #[tool(
-        description = "Unload all loaded models and stop backend processes to free memory. Refused while jobs are queued or running."
+        description = "Unload all loaded local models and stop backend processes to free memory. Refused while local jobs are queued or running; cloud jobs don't block it."
     )]
     async fn unload_models(&self) -> Result<CallToolResult, McpError> {
         let unloaded = self.state.jobs.unload_all().await?;
@@ -479,9 +510,10 @@ adk_mcp_sdk::mcp_2026_server! {
     destructive_tools: [],
     idempotent_tools: ["cancel_job", "unload_models"],
     cache_ttl_ms: 60_000,
-    instructions: "Local image generation. Call list_models first to see which models are ready and whether their weights allow commercial use. \
-generate_image and edit_image can take minutes on large models; pass wait=false and poll get_job if your client times out. \
-Only one generation runs at a time; call unload_models to free memory for other apps.",
+    instructions: "Image generation with local models and optional cloud models. Call list_models first to see which models are ready, \
+where each runs (cloud models send prompts and input images to their provider) and what their licences allow. \
+generate_image and edit_image can take minutes on large local models; pass wait=false and poll get_job if your client times out. \
+One local and one cloud generation can run at a time; call unload_models to free memory for other apps.",
 }
 
 #[async_trait::async_trait]
