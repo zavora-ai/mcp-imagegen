@@ -11,12 +11,24 @@ use crate::error::ImageGenError;
 use crate::registry::ModelSpec;
 use crate::request::ResolvedRequest;
 
+#[cfg(feature = "codex")]
+pub mod codex;
 #[cfg(feature = "mflux")]
 pub mod mflux;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
+pub mod process;
 #[cfg(feature = "sdcpp")]
 pub mod sdcpp;
+
+/// Where a backend does its work. Cloud backends skip the memory pre-flight and run in their own job lane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Runs {
+    #[default]
+    Local,
+    Cloud,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -28,11 +40,22 @@ pub enum Availability {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
-    Queued { position: usize },
+    Queued {
+        position: usize,
+    },
+    /// A subprocess backend is starting its tool (e.g. `codex`).
+    Starting {
+        backend: String,
+    },
     Loading,
     Encoding,
-    Sampling { step: u32, total: u32 },
+    Sampling {
+        step: u32,
+        total: u32,
+    },
     Decoding,
+    /// Waiting on a backend that reports no step counts (e.g. a cloud tool).
+    Generating,
     Saving,
 }
 
@@ -40,10 +63,12 @@ impl std::fmt::Display for Phase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Queued { position } => write!(f, "queued (position {position})"),
+            Self::Starting { backend } => write!(f, "starting {backend}"),
             Self::Loading => f.write_str("loading model"),
             Self::Encoding => f.write_str("encoding prompt"),
             Self::Sampling { step, total } => write!(f, "sampling {step}/{total}"),
             Self::Decoding => f.write_str("decoding"),
+            Self::Generating => f.write_str("generating"),
             Self::Saving => f.write_str("saving"),
         }
     }
@@ -78,12 +103,16 @@ pub struct Timings {
 }
 
 /// What a backend hands back. Backends never write files themselves.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GeneratedImage {
     pub png: Vec<u8>,
-    /// Seed the backend actually used.
-    pub seed: u64,
+    /// Seed the backend actually used; `None` when the backend has no seeds (e.g. Codex).
+    pub seed: Option<u64>,
     pub timings: Timings,
+    /// Things the caller should know, appended to the result's warnings.
+    pub warnings: Vec<String>,
+    /// Backend-specific provenance recorded in the sidecar (`backend_details`).
+    pub details: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +178,16 @@ pub trait ImageBackend: Send + Sync {
 
     /// Id of the model currently resident, if any.
     fn loaded_model(&self) -> Option<String>;
+
+    /// Local machine or a cloud service.
+    fn runs(&self) -> Runs {
+        Runs::Local
+    }
+
+    /// Who receives prompts and images, for cloud backends.
+    fn provider(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Backends keyed by id.

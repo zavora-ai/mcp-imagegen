@@ -53,6 +53,19 @@ pub struct MfluxModel {
     pub extra_args: Vec<String>,
 }
 
+/// Settings for a model served through the Codex CLI (`backend = "codex"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexModel {
+    /// Agent model passed to `codex exec -m` (the image itself comes from Codex's built-in tool).
+    pub model: String,
+    /// Passed as `-c model_reasoning_effort=<value>` (e.g. "low"); Codex's default when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
@@ -60,7 +73,15 @@ pub struct ModelSpec {
     pub backend: String,
     pub capabilities: Vec<Capability>,
     pub license: String,
+    /// Whether local weights may be used commercially. Not meaningful for cloud models.
+    #[serde(default)]
     pub commercial_weights: bool,
+    /// Whether generated images may be used commercially, when the licence speaks about outputs
+    /// (e.g. a cloud service's terms). Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commercial_outputs: Option<bool>,
+    /// Estimated resident memory; 0 for cloud models.
+    #[serde(default)]
     pub est_memory_mb: u64,
     pub max_pixels: u64,
     pub size_multiple: u32,
@@ -73,6 +94,9 @@ pub struct ModelSpec {
     pub extra_args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mflux: Option<MfluxModel>,
+    /// Codex settings; required when `backend = "codex"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<CodexModel>,
     /// Extra backend request fields for this model, e.g. `{ cache_mode = "easycache" }` for sd.cpp.
     /// Core fields (prompt, size, seed, steps, cfg) always come from the request.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -204,6 +228,17 @@ impl ModelSpec {
                 "model `{}`: the `edit` capability and max_ref_images >= 1 go together",
                 self.id
             ));
+        }
+        if (self.backend == "codex") != self.codex.is_some() {
+            return Err(format!(
+                "model `{}`: `backend = \"codex\"` and a `codex` section go together",
+                self.id
+            ));
+        }
+        if let Some(codex) = &self.codex
+            && codex.model.trim().is_empty()
+        {
+            return Err(format!("model `{}`: codex.model is empty", self.id));
         }
         if let Some(schedule) = &self.sigma_schedule {
             schedule
@@ -374,7 +409,9 @@ mod tests {
             vec![
                 "qwen-image-2.1-turbo",
                 "qwen-image-2.1",
-                "qwen-image-2.1-hq"
+                "qwen-image-2.1-hq",
+                "codex-image",
+                "codex-image-astra"
             ]
         );
         let q = reg.get("qwen-image-2.1").unwrap();
@@ -591,6 +628,45 @@ defaults = { width = 8, height = 8, steps = 1, cfg_scale = 1.0 }
             ModelRegistry::from_toml(&bad)
                 .unwrap_err()
                 .contains("strictly decreasing")
+        );
+    }
+
+    #[test]
+    fn codex_models_parse_and_validate() {
+        let base = r#"
+[[models]]
+id = "cloud"
+backend = "codex"
+capabilities = ["txt2img", "edit"]
+license = "OpenAI terms"
+commercial_outputs = true
+max_pixels = 4194304
+size_multiple = 16
+max_ref_images = 3
+defaults = { width = 1024, height = 1024, steps = 1, cfg_scale = 1.0 }
+"#;
+        let ok =
+            format!("{base}codex = {{ model = \"gpt-5.6-terra\", reasoning_effort = \"low\" }}\n");
+        let reg = ModelRegistry::from_toml(&ok).unwrap();
+        let m = reg.get("cloud").unwrap();
+        assert_eq!(m.codex.as_ref().unwrap().model, "gpt-5.6-terra");
+        assert_eq!(m.commercial_outputs, Some(true));
+        assert!(!m.commercial_weights);
+        assert_eq!(m.est_memory_mb, 0);
+
+        let missing = ModelRegistry::from_toml(base).unwrap_err();
+        assert!(missing.contains("go together"), "{missing}");
+        let empty = format!("{base}codex = {{ model = \" \" }}\n");
+        assert!(
+            ModelRegistry::from_toml(&empty)
+                .unwrap_err()
+                .contains("codex.model is empty")
+        );
+        let wrong_backend = ok.replace("backend = \"codex\"", "backend = \"sdcpp\"");
+        assert!(
+            ModelRegistry::from_toml(&wrong_backend)
+                .unwrap_err()
+                .contains("go together")
         );
     }
 

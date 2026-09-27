@@ -170,6 +170,15 @@ pub fn write_image(
     Ok(WrittenImage { path, sidecar_path })
 }
 
+/// Pixel size of an encoded image (header only; nothing is decoded).
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 /// Downscaled PNG for inline display: longest side ≤ 512 px and under 1 MB.
 pub fn make_preview(png: &[u8]) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(png).map_err(|e| e.to_string())?;

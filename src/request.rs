@@ -215,6 +215,25 @@ impl GenerateRequest {
         };
 
         let mut warnings = Vec::new();
+        if model.codex.is_some() {
+            let given = [
+                ("seed", self.seed.is_some()),
+                ("steps", self.steps.is_some()),
+                ("cfg_scale", self.cfg_scale.is_some()),
+                (
+                    "sampler",
+                    self.sampler
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty()),
+                ),
+            ];
+            for (field, _) in given.iter().filter(|(_, g)| *g) {
+                warnings.push(format!(
+                    "`{field}` is ignored: `{}` runs through Codex, which has no {field} control",
+                    model.id
+                ));
+            }
+        }
         if prompt.chars().count() > LONG_PROMPT_CHARS {
             warnings.push(format!(
                 "prompt is over {LONG_PROMPT_CHARS} characters; the text encoder may truncate it"

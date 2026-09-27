@@ -13,12 +13,16 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Availability, BackendError, GeneratedImage, ImageBackend, Phase, ProgressSink, Timings,
+    Availability, BackendError, GeneratedImage, ImageBackend, Phase, ProgressSink, Runs, Timings,
 };
 use crate::registry::ModelSpec;
 use crate::request::ResolvedRequest;
 
 pub struct MockBackend {
+    id: &'static str,
+    runs: Runs,
+    /// Cloud-style mocks report no seed, like Codex.
+    seeded: bool,
     step_delay: Duration,
     loaded: Mutex<Option<String>>,
     fail_next: AtomicBool,
@@ -27,13 +31,27 @@ pub struct MockBackend {
 }
 
 impl MockBackend {
+    /// Local mock (`mock`): seeded, local lane.
     pub fn new(step_delay: Duration) -> Self {
         Self {
+            id: "mock",
+            runs: Runs::Local,
+            seeded: true,
             step_delay,
             loaded: Mutex::new(None),
             fail_next: AtomicBool::new(false),
             generations: AtomicUsize::new(0),
             unloads: AtomicUsize::new(0),
+        }
+    }
+
+    /// Cloud-flavoured mock (`mock-cloud`): no seed, cloud lane, nothing to unload.
+    pub fn cloud(step_delay: Duration) -> Self {
+        Self {
+            id: "mock-cloud",
+            runs: Runs::Cloud,
+            seeded: false,
+            ..Self::new(step_delay)
         }
     }
 
@@ -43,12 +61,17 @@ impl MockBackend {
 
     /// 32x32 PNG whose colour is a pure function of the seed.
     pub fn render(seed: u64) -> Vec<u8> {
+        Self::render_sized(seed, 32, 32)
+    }
+
+    /// `w`x`h` PNG whose colour is a pure function of the seed.
+    pub fn render_sized(seed: u64, w: u32, h: u32) -> Vec<u8> {
         let rgb = [
             (seed & 0xff) as u8,
             ((seed >> 8) & 0xff) as u8,
             ((seed >> 16) & 0xff) as u8,
         ];
-        let img = image::RgbImage::from_pixel(32, 32, image::Rgb(rgb));
+        let img = image::RgbImage::from_pixel(w.max(1), h.max(1), image::Rgb(rgb));
         let mut out = Vec::new();
         image::DynamicImage::ImageRgb8(img)
             .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
@@ -60,7 +83,7 @@ impl MockBackend {
 #[async_trait::async_trait]
 impl ImageBackend for MockBackend {
     fn id(&self) -> &'static str {
-        "mock"
+        self.id
     }
 
     async fn availability(&self) -> Availability {
@@ -76,7 +99,9 @@ impl ImageBackend for MockBackend {
         cancel: CancellationToken,
     ) -> Result<GeneratedImage, BackendError> {
         progress.report(Phase::Loading);
-        *self.loaded.lock().unwrap() = Some(model.id.clone());
+        if self.runs == Runs::Local {
+            *self.loaded.lock().unwrap() = Some(model.id.clone());
+        }
         if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(BackendError::Failed {
                 message: "injected failure".into(),
@@ -104,13 +129,14 @@ impl ImageBackend for MockBackend {
             None => request.seed,
         };
         Ok(GeneratedImage {
-            png: Self::render(colour_seed),
-            seed: request.seed,
+            png: Self::render_sized(colour_seed, request.width, request.height),
+            seed: self.seeded.then_some(request.seed),
             timings: Timings {
                 load_ms: Some(0),
                 sample_ms: Some(self.step_delay.as_millis() as u64 * u64::from(request.steps)),
                 decode_ms: Some(0),
             },
+            ..Default::default()
         })
     }
 
@@ -122,5 +148,13 @@ impl ImageBackend for MockBackend {
 
     fn loaded_model(&self) -> Option<String> {
         self.loaded.lock().unwrap().clone()
+    }
+
+    fn runs(&self) -> Runs {
+        self.runs
+    }
+
+    fn provider(&self) -> Option<&'static str> {
+        (self.runs == Runs::Cloud).then_some("nobody (mock)")
     }
 }
